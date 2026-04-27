@@ -59,12 +59,21 @@ ALPACA_SECRET_KEY=your-secret
 ## Usage
 
 ```bash
-leaps-bot status      # show current positions and account state
-leaps-bot dry-run     # simulate today's actions without placing orders
-leaps-bot run         # execute the daily check
+leaps-bot status                            # show current positions and account state
+leaps-bot dry-run                           # simulate today's actions without placing orders
+leaps-bot run                               # execute the daily check
+leaps-bot report                            # generate PDF performance report
+leaps-bot export-trades                     # export full trade log as CSV
+leaps-bot export-tax --year 2026            # export 1099-B-style tax CSV for a year
 ```
 
-The first run will create `data/state.json` to track positions and allocations.
+The first run will create `data/state.json` to track positions, allocations, trades, and daily snapshots. Generated reports go to `reports/` (gitignored).
+
+### Report contents
+
+- **PDF report** — summary stats, portfolio value chart with SPY benchmark, cumulative realized P&L chart, open positions table, allocation history, recent trade history
+- **Trade CSV** — every fill (buy + sell) with timestamps, prices, underlying price at trade, realized P&L for closes
+- **Tax CSV** — closed positions in 1099-B format: description, dates, proceeds, cost basis, gain/loss, holding period, short-term/long-term classification
 
 ## Configuration
 

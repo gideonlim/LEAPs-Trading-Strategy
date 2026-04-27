@@ -9,6 +9,7 @@ build/
 .env
 data/state.json
 logs/
+reports/
 
 .venv/
 venv/

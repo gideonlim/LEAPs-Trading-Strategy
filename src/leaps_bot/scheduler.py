@@ -11,10 +11,14 @@ from leaps_bot.models import (
     Action,
     AllocationRecord,
     ContractCandidate,
+    DailySnapshot,
     OptionDetails,
     OrderResult,
     PendingOrderRecord,
     PositionRecord,
+    PositionSnapshot,
+    RunRecord,
+    TradeRecord,
 )
 from leaps_bot.order_executor import OrderExecutor
 from leaps_bot.position_manager import PositionManager
@@ -45,38 +49,147 @@ class DailyScheduler:
     def run(self) -> dict:
         summary: dict = {"actions": [], "errors": [], "skipped": False, "real_trades_today": False}
         today_iso = date.today().isoformat()
-        now_str = datetime.now().isoformat()
+        run_start = datetime.now()
+        now_str = run_start.isoformat()
 
         # last_run is a monitoring timestamp — always update, even on dry-run
         self._state.last_run = now_str
 
-        if not self._preflight(summary):
+        try:
+            if not self._preflight(summary):
+                return summary
+
+            already_traded = self._state.last_trade_date == today_iso
+            if already_traded:
+                logger.info("Already traded today (%s), running monitoring only", today_iso)
+
+            self._rates.fetch_rates()
+            self._reconcile_pending_orders(summary)
+
+            if not already_traded:
+                self._handle_positions(summary)
+                if self._allocator.should_allocate_today():
+                    self._handle_allocation(summary)
+
+            if summary["real_trades_today"] and not self._config.dry_run:
+                self._state.last_trade_date = today_iso
+
+            # Capture daily portfolio snapshot — only on full runs (preflight passed)
+            # and not in dry-run mode (snapshots are persistent state).
+            if not self._config.dry_run:
+                snapshot = self._capture_daily_snapshot(today_iso, now_str)
+                if snapshot is not None:
+                    self._state.add_snapshot(snapshot)
+                    summary["portfolio_value"] = snapshot.portfolio_value
+
+            self._log_summary(summary)
             return summary
+        finally:
+            # Always record the run, even on early exit / skip / exception
+            if not self._config.dry_run:
+                duration = (datetime.now() - run_start).total_seconds()
+                self._record_run(summary, now_str, duration)
 
-        # Idempotency: if we already triggered real trades today, only do monitoring
-        already_traded = self._state.last_trade_date == today_iso
-        if already_traded:
-            logger.info("Already traded today (%s), running monitoring only", today_iso)
+    def _capture_daily_snapshot(self, today_iso: str, timestamp: str) -> DailySnapshot | None:
+        try:
+            acct = self._client.get_account()
+        except Exception as e:
+            logger.warning("Could not fetch account for snapshot: %s", e)
+            return None
 
-        self._rates.fetch_rates()
+        cash = _safe_float(getattr(acct, "cash", 0))
+        opt_bp = _safe_float(getattr(acct, "options_buying_power", None))
+        portfolio_value = _safe_float(getattr(acct, "portfolio_value", None))
 
-        # Pending order reconciliation runs every time — this is monitoring,
-        # and is what mutates state on confirmed fills
-        self._reconcile_pending_orders(summary)
+        position_snaps: list[PositionSnapshot] = []
+        positions_market_value = 0.0
+        underlying_prices: dict[str, float] = {}
 
-        if not already_traded:
-            self._handle_positions(summary)
+        try:
+            positions = self._client.get_option_positions()
+        except Exception as e:
+            logger.warning("Could not fetch positions for snapshot: %s", e)
+            positions = []
 
-            if self._allocator.should_allocate_today():
-                self._handle_allocation(summary)
+        for pos in positions:
+            try:
+                sym = pos.symbol
+                details = OptionDetails.from_occ_symbol(sym)
+                qty = int(_safe_float(getattr(pos, "qty", 0)))
+                avg_entry = _safe_float(getattr(pos, "avg_entry_price", 0))
+                current_price = _safe_float(getattr(pos, "current_price", 0))
+                market_value = _safe_float(getattr(pos, "market_value", 0))
+                cost_basis = _safe_float(getattr(pos, "cost_basis", 0))
+                unrealized_pl = _safe_float(getattr(pos, "unrealized_pl", 0))
+                unrealized_plpc = _safe_float(getattr(pos, "unrealized_plpc", 0))
+                days_remaining = (details.expiry - date.today()).days
 
-        # Mark last_trade_date only if a real (non-dry-run) order was actually
-        # accepted by the broker today
-        if summary["real_trades_today"] and not self._config.dry_run:
-            self._state.last_trade_date = today_iso
+                position_snaps.append(PositionSnapshot(
+                    symbol=sym,
+                    underlying=details.underlying,
+                    strike=details.strike,
+                    expiry=details.expiry.isoformat(),
+                    qty=qty,
+                    avg_entry_price=avg_entry,
+                    current_price=current_price,
+                    market_value=market_value,
+                    cost_basis=cost_basis,
+                    unrealized_pl=unrealized_pl,
+                    unrealized_plpc=unrealized_plpc,
+                    days_remaining=days_remaining,
+                ))
+                positions_market_value += market_value
 
-        self._log_summary(summary)
-        return summary
+                if details.underlying not in underlying_prices:
+                    spot = self._safe_get_underlying_price(details.underlying)
+                    if spot is not None:
+                        underlying_prices[details.underlying] = spot
+            except Exception as e:
+                logger.warning("Skipping position %s in snapshot: %s", getattr(pos, "symbol", "?"), e)
+
+        # Always capture SPY price for benchmarking, even with no positions
+        if "SPY" not in underlying_prices:
+            spy = self._safe_get_underlying_price("SPY")
+            if spy is not None:
+                underlying_prices["SPY"] = spy
+
+        # If account.portfolio_value isn't available, derive it
+        if portfolio_value <= 0:
+            portfolio_value = cash + positions_market_value
+
+        return DailySnapshot(
+            date=today_iso,
+            timestamp=timestamp,
+            cash=cash,
+            options_buying_power=opt_bp,
+            portfolio_value=portfolio_value,
+            positions_market_value=positions_market_value,
+            num_positions=len(position_snaps),
+            underlying_prices=underlying_prices,
+            positions=position_snaps,
+        )
+
+    def _record_run(self, summary: dict, timestamp: str, duration: float) -> None:
+        action_summaries = [
+            f"{a.get('type', '?')}:{a.get('symbol', '')}" for a in summary.get("actions", [])
+        ]
+        skip_reason = None
+        if summary.get("skipped"):
+            for a in summary.get("actions", []):
+                if a.get("type") == "skip":
+                    skip_reason = a.get("reason")
+                    break
+
+        self._state.add_run(RunRecord(
+            timestamp=timestamp,
+            duration_seconds=duration,
+            skipped=summary.get("skipped", False),
+            skip_reason=skip_reason,
+            actions=action_summaries,
+            errors=list(summary.get("errors", [])),
+            real_trades_today=summary.get("real_trades_today", False),
+            portfolio_value=summary.get("portfolio_value"),
+        ))
 
     # -- Preflight --
 
@@ -141,6 +254,7 @@ class DailyScheduler:
             )
 
             # Fetch current fill details (for partial AND terminal states, we may have new qty to record)
+            order = None
             try:
                 order = self._client.get_order(pending.order_id)
                 filled_qty = int(_safe_float(getattr(order, "filled_qty", 0)))
@@ -153,7 +267,8 @@ class DailyScheduler:
             new_qty = max(0, filled_qty - pending.recorded_qty)
 
             if new_qty > 0:
-                self._record_fill_increment(pending, new_qty, avg_price, summary)
+                fill_timestamp = self._extract_fill_timestamp(order)
+                self._record_fill_increment(pending, new_qty, avg_price, fill_timestamp, summary)
                 pending.recorded_qty = filled_qty
 
             is_terminal = status in self._TERMINAL_STATUSES
@@ -204,16 +319,25 @@ class DailyScheduler:
         pending: PendingOrderRecord,
         new_qty: int,
         avg_price: float,
+        fill_timestamp: str,
         summary: dict,
     ) -> None:
-        """Record `new_qty` shares filled on this order. Idempotent across reconciliations."""
+        """Record `new_qty` shares filled on this order. Idempotent across reconciliations.
+
+        `fill_timestamp` should be the broker's actual fill time (ISO datetime), not
+        the reconciliation time. This matters for tax classification near year-end
+        and for accurate holding-period calculation.
+
+        Also appends a TradeRecord for reporting (with realized P&L computed for sells).
+        """
         symbol = pending.option_symbol
+        details = OptionDetails.from_occ_symbol(symbol)
+        underlying_price = self._safe_get_underlying_price(details.underlying)
+        fill_date = self._parse_iso_date(fill_timestamp)
 
         if pending.action == "buy":
-            details = OptionDetails.from_occ_symbol(symbol)
             existing = self._state.get_position(symbol)
             if existing is not None:
-                # Update qty + weighted avg price
                 total_qty = existing.qty + new_qty
                 if total_qty > 0:
                     existing.avg_entry_price = (
@@ -230,8 +354,8 @@ class DailyScheduler:
                     underlying=details.underlying,
                     strike=details.strike,
                     expiry_date=details.expiry.isoformat(),
-                    purchase_date=date.today().isoformat(),
-                    original_dte=(details.expiry - date.today()).days,
+                    purchase_date=fill_date.isoformat(),
+                    original_dte=(details.expiry - fill_date).days,
                     qty=new_qty,
                     avg_entry_price=avg_price,
                     order_id=pending.order_id,
@@ -241,9 +365,7 @@ class DailyScheduler:
                     symbol, new_qty, avg_price,
                 )
 
-            # For allocation intent: record the allocation on the FIRST fill
-            # (any fill = capital deployed = quarter is allocated). Subsequent
-            # increments update the existing record's amount.
+            # For allocation intent: record on first fill, accumulate on subsequent
             if pending.intent == "allocate" and pending.quarter:
                 existing_alloc = next(
                     (a for a in self._state.allocations if a.quarter == pending.quarter),
@@ -253,7 +375,7 @@ class DailyScheduler:
                 if existing_alloc is None:
                     self._state.record_allocation(AllocationRecord(
                         quarter=pending.quarter,
-                        allocated_date=date.today().isoformat(),
+                        allocated_date=fill_date.isoformat(),
                         amount=fill_value,
                         contracts_bought=[symbol],
                     ))
@@ -266,6 +388,21 @@ class DailyScheduler:
                     if symbol not in existing_alloc.contracts_bought:
                         existing_alloc.contracts_bought.append(symbol)
 
+            self._state.add_trade(TradeRecord(
+                timestamp=fill_timestamp,
+                order_id=pending.order_id,
+                action="buy",
+                intent=pending.intent,
+                symbol=symbol,
+                underlying=details.underlying,
+                strike=details.strike,
+                expiry=details.expiry.isoformat(),
+                qty=new_qty,
+                fill_price=avg_price,
+                total_value=avg_price * new_qty * 100,
+                underlying_price=underlying_price,
+            ))
+
             summary["actions"].append({
                 "type": "fill_buy",
                 "symbol": symbol,
@@ -276,6 +413,9 @@ class DailyScheduler:
 
         elif pending.action == "sell":
             existing = self._state.get_position(symbol)
+            entry_price = existing.avg_entry_price if existing else None
+            purchase_date_str = existing.purchase_date if existing else None
+
             if existing is not None:
                 existing.qty -= new_qty
                 if existing.qty <= 0:
@@ -287,8 +427,45 @@ class DailyScheduler:
                         symbol, existing.qty, new_qty,
                     )
             else:
-                logger.warning(
-                    "Sell fill for %s but no position record found", symbol,
+                logger.warning("Sell fill for %s but no position record found", symbol)
+
+            realized_pnl = None
+            holding_days = None
+            if entry_price is not None:
+                realized_pnl = (avg_price - entry_price) * new_qty * 100
+                if purchase_date_str:
+                    try:
+                        purchase_date = date.fromisoformat(purchase_date_str)
+                        # Holding period must be measured from purchase to actual fill,
+                        # not to today. Reconciliation can lag the fill by hours/days,
+                        # which would otherwise inflate holding period and could flip
+                        # short-vs-long-term tax classification near the 365-day boundary.
+                        holding_days = (fill_date - purchase_date).days
+                    except ValueError:
+                        pass
+
+            self._state.add_trade(TradeRecord(
+                timestamp=fill_timestamp,
+                order_id=pending.order_id,
+                action="sell",
+                intent=pending.intent,
+                symbol=symbol,
+                underlying=details.underlying,
+                strike=details.strike,
+                expiry=details.expiry.isoformat(),
+                qty=new_qty,
+                fill_price=avg_price,
+                total_value=avg_price * new_qty * 100,
+                underlying_price=underlying_price,
+                avg_entry_price=entry_price,
+                realized_pnl=realized_pnl,
+                holding_days=holding_days,
+            ))
+
+            if realized_pnl is not None:
+                logger.info(
+                    "Sell fill: %s qty=%d, entry=$%.2f, exit=$%.2f, realized P&L=$%.2f",
+                    symbol, new_qty, entry_price, avg_price, realized_pnl,
                 )
 
             summary["actions"].append({
@@ -296,7 +473,48 @@ class DailyScheduler:
                 "symbol": symbol,
                 "qty": new_qty,
                 "intent": pending.intent,
+                "realized_pnl": realized_pnl,
             })
+
+    def _safe_get_underlying_price(self, underlying: str) -> float | None:
+        try:
+            return self._client.get_underlying_price(underlying)
+        except Exception as e:
+            logger.warning("Could not fetch underlying price for %s: %s", underlying, e)
+            return None
+
+    @staticmethod
+    def _extract_fill_timestamp(order) -> str:
+        """Return the broker's actual fill time as ISO string.
+
+        Prefers `filled_at` (set when the order is fully filled), falls back to
+        `updated_at` (last change — typically the most recent partial fill),
+        then `submitted_at`, then now() as last resort. This is what should be
+        recorded on TradeRecord and used for holding-period math, NOT the
+        reconciliation time, since reconciliation can lag the actual fill.
+        """
+        if order is None:
+            return datetime.now().isoformat()
+        for attr in ("filled_at", "updated_at", "submitted_at"):
+            ts = getattr(order, attr, None)
+            if ts is None:
+                continue
+            if isinstance(ts, datetime):
+                return ts.isoformat()
+            return str(ts)
+        return datetime.now().isoformat()
+
+    @staticmethod
+    def _parse_iso_date(iso_timestamp: str) -> date:
+        """Extract the date portion from an ISO datetime string."""
+        try:
+            # Strip timezone suffix and microseconds before parsing
+            return datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00")).date()
+        except (ValueError, AttributeError):
+            try:
+                return date.fromisoformat(iso_timestamp.split("T")[0])
+            except (ValueError, AttributeError, IndexError):
+                return date.today()
 
     # -- Position handling: submit sells, do NOT roll until fill confirmed --
 

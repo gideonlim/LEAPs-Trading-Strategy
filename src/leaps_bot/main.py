@@ -4,12 +4,14 @@ import argparse
 import json
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 from leaps_bot.alpaca_client import AlpacaClient
 from leaps_bot.config import load_config
 from leaps_bot.logging_config import setup_logging
 from leaps_bot.pricing import RateFetcher
+from leaps_bot.reporting import ReportGenerator
 from leaps_bot.scheduler import DailyScheduler
 from leaps_bot.state import BotState
 
@@ -18,30 +20,49 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LEAPs Options Strategy Bot")
-    parser.add_argument(
-        "command",
-        choices=["run", "dry-run", "status"],
-        help="run=execute daily check, dry-run=simulate without orders, status=show current state",
-    )
-    parser.add_argument("--config", default="config.yaml", help="Path to config file")
-    parser.add_argument("--state", default="data/state.json", help="Path to state file")
-    parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", default="config.yaml", help="Path to config file")
+    common.add_argument("--state", default="data/state.json", help="Path to state file")
+    common.add_argument("--verbose", action="store_true", help="Enable debug logging")
+
+    sub.add_parser("run", parents=[common], help="Execute the daily check")
+    sub.add_parser("dry-run", parents=[common], help="Simulate without placing orders")
+    sub.add_parser("status", parents=[common], help="Show current positions and account state")
+
+    p_report = sub.add_parser("report", parents=[common], help="Generate a PDF performance report")
+    p_report.add_argument("--output", default=None, help="Output PDF path (default: reports/leaps-report-<date>.pdf)")
+
+    p_trades = sub.add_parser("export-trades", parents=[common], help="Export full trade log to CSV")
+    p_trades.add_argument("--output", default=None, help="Output CSV path (default: reports/trades.csv)")
+
+    p_tax = sub.add_parser("export-tax", parents=[common], help="Export tax-year closed positions (1099-B style) to CSV")
+    p_tax.add_argument("--year", type=int, default=None, help="Tax year (default: all years)")
+    p_tax.add_argument("--output", default=None, help="Output CSV path (default: reports/tax-<year>.csv)")
+
     args = parser.parse_args()
 
     config = load_config(args.config)
     if args.command == "dry-run":
         config.dry_run = True
-    if args.verbose:
+    if getattr(args, "verbose", False):
         config.log_level = "DEBUG"
 
     setup_logging(config.log_level)
+
+    state_path = Path(args.state)
+    state = BotState.load(state_path)
+
+    # Reporting commands don't need API keys
+    if args.command in ("report", "export-trades", "export-tax"):
+        _run_reporting(args, state)
+        return
 
     if not config.api_key or not config.secret_key:
         print("ERROR: ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in .env or environment", file=sys.stderr)
         sys.exit(1)
 
-    state_path = Path(args.state)
-    state = BotState.load(state_path)
     client = AlpacaClient(config)
     rate_fetcher = RateFetcher(config.pricing)
     scheduler = DailyScheduler(config, client, state, rate_fetcher)
@@ -61,9 +82,6 @@ def main() -> None:
         logger.exception("Unhandled exception during scheduler run: %s", e)
         exit_code = 2
     finally:
-        # Always save state, even on partial failures. State updates from
-        # confirmed fills must persist so we don't double-trade tomorrow.
-        # Skip saving in dry-run to keep dry-run truly read-only.
         if not config.dry_run:
             try:
                 state.save(state_path)
@@ -74,6 +92,29 @@ def main() -> None:
             logger.info("[DRY-RUN] Skipping state save")
 
     sys.exit(exit_code)
+
+
+def _run_reporting(args, state: BotState) -> None:
+    generator = ReportGenerator(state)
+
+    if args.command == "report":
+        out = Path(args.output) if args.output else Path(f"reports/leaps-report-{date.today().isoformat()}.pdf")
+        path = generator.generate_pdf(out)
+        print(f"PDF report: {path}")
+
+    elif args.command == "export-trades":
+        out = Path(args.output) if args.output else Path("reports/trades.csv")
+        path = generator.export_trades_csv(out)
+        print(f"Trade log: {path} ({len(state.trades)} trades)")
+
+    elif args.command == "export-tax":
+        if args.output:
+            out = Path(args.output)
+        else:
+            year_part = f"-{args.year}" if args.year else ""
+            out = Path(f"reports/tax{year_part}.csv")
+        path = generator.export_tax_csv(out, year=args.year)
+        print(f"Tax CSV: {path}")
 
 
 if __name__ == "__main__":

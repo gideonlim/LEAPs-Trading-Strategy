@@ -91,7 +91,11 @@ class FakeClock:
 class FakeAccount:
     cash: str = "50000.00"
     buying_power: str = "50000.00"
+    options_buying_power: str = "50000.00"
+    portfolio_value: str = "50000.00"
     trading_blocked: bool = False
+    account_blocked: bool = False
+    options_trading_level: int = 2
 
 
 @dataclass
