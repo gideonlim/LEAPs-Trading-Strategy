@@ -35,7 +35,7 @@ def _make(dry_run=False, positions_in_account=None, pending_orders=None, last_tr
         dry_run=dry_run,
         strategy=StrategyConfig(),
         pricing=PricingConfig(),
-        allocation=AllocationConfig(quarterly_months=[3, 6, 9, 12], allocation_window_days=7),
+        allocation=AllocationConfig(quarterly_months=[3, 6, 9, 12], allocation_window_days=7, bootstrap_on_first_run=False),
         safety=SafetyConfig(no_trade_minutes_after_open=60),
     )
     client = MagicMock()

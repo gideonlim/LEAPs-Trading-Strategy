@@ -21,7 +21,8 @@ allocation:
   quarterly_months: [3, 6, 9, 12]
   max_cash_deploy_pct: 0.90
   min_cash_reserve: 500.0
-  allocation_window_days: 7   # only allocate within first N calendar days of quarter month
+  allocation_window_days: 7     # only allocate within first N calendar days of quarter month
+  bootstrap_on_first_run: true  # deploy capital immediately on first run (don't wait for quarterly window)
 
 safety:
   no_trade_minutes_after_open: 60

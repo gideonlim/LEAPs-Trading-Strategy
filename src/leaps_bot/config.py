@@ -33,6 +33,7 @@ class AllocationConfig:
     max_cash_deploy_pct: float = 0.90
     min_cash_reserve: float = 500.0
     allocation_window_days: int = 7  # Only allocate within the first N calendar days of a quarter month
+    bootstrap_on_first_run: bool = True  # Deploy capital immediately on first run instead of waiting for next quarterly window
 
 
 @dataclass

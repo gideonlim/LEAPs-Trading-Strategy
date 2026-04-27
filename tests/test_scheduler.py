@@ -12,7 +12,7 @@ def _make_scheduler(is_open=True, minutes_since=90, dry_run=True):
     config = AppConfig(
         dry_run=dry_run,
         strategy=StrategyConfig(),
-        allocation=AllocationConfig(quarterly_months=[3, 6, 9, 12]),
+        allocation=AllocationConfig(quarterly_months=[3, 6, 9, 12], bootstrap_on_first_run=False),
         safety=SafetyConfig(no_trade_minutes_after_open=60),
     )
     client = MagicMock()

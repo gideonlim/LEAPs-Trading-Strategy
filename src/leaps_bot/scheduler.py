@@ -75,9 +75,20 @@ class DailyScheduler:
                 # Drain any followup actions queued by prior monitor passes
                 # (e.g., roll buys for sells that filled mid-day yesterday)
                 self._process_pending_followups(summary)
-                self._handle_positions(summary)
-                if self._allocator.should_allocate_today():
+
+                # Safety gate: if local state is empty but the broker account
+                # already holds positions, something is wrong (state lost/reset).
+                # Block ALL trading — positions, allocations, bootstrap — until
+                # the user manually reconciles.
+                if self._is_state_desynced(summary):
+                    pass  # error logged + recorded; skip entire trading branch
+                elif self._should_bootstrap():
+                    logger.info("First run detected — bootstrapping initial allocation")
                     self._handle_allocation(summary)
+                else:
+                    self._handle_positions(summary)
+                    if self._allocator.should_allocate_today():
+                        self._handle_allocation(summary)
 
             if summary["real_trades_today"] and not self._config.dry_run:
                 self._state.last_trade_date = today_iso
@@ -256,6 +267,67 @@ class DailyScheduler:
             portfolio_value=summary.get("portfolio_value"),
             run_type="monitor" if summary.get("monitor_only") else "trade",
         ))
+
+    def _has_virgin_state(self) -> bool:
+        """True if local state has zero history — no positions, trades,
+        allocations, or in-flight orders have ever been recorded."""
+        return (
+            not self._state.positions
+            and not self._state.trades
+            and not self._state.allocations
+            and not self._state.pending_orders
+            and not self._state.pending_followups
+        )
+
+    def _is_state_desynced(self, summary: dict) -> bool:
+        """Detect state-vs-broker inconsistency and block all trading if found.
+
+        If local state is completely empty (virgin) but the Alpaca account
+        already holds option positions, the state file was likely lost, reset,
+        or the user bought options manually. Trading in this condition is
+        dangerous — the bot would evaluate positions with guessed original_dte
+        and could deploy additional capital via quarterly allocation on top of
+        existing holdings.
+
+        Returns True (and records an error in summary) if desynced. The caller
+        must skip the ENTIRE trading branch — not just bootstrap.
+        """
+        if not self._has_virgin_state():
+            return False  # state has history → consistent enough to proceed
+
+        try:
+            live_positions = self._client.get_option_positions()
+        except Exception as e:
+            logger.error("Cannot verify account consistency: %s — blocking all trading", e)
+            summary["errors"].append(f"State consistency check failed: {e}")
+            return True
+
+        if live_positions:
+            logger.error(
+                "STATE DESYNC: local state is empty but the Alpaca account holds "
+                "%d option position(s). The bot will NOT trade until state is manually "
+                "reconciled. Run 'leaps-bot status' to inspect the account, then "
+                "either restore the state file or re-initialize.",
+                len(live_positions),
+            )
+            summary["errors"].append(
+                f"State desync: empty state but {len(live_positions)} live position(s) in broker"
+            )
+            return True
+
+        return False
+
+    def _should_bootstrap(self) -> bool:
+        """Detect a genuine first run where the bot has never traded.
+
+        Only checks local state — the live-account guard is handled by
+        `_is_state_desynced` which runs BEFORE this in the trading flow.
+        By the time we get here, we've already confirmed the broker account
+        is also empty.
+        """
+        if not self._config.allocation.bootstrap_on_first_run:
+            return False
+        return self._has_virgin_state()
 
     # -- Preflight --
 

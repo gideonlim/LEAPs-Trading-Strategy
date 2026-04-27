@@ -30,7 +30,7 @@ def _make_scheduler(pending_orders=None):
         dry_run=False,
         strategy=StrategyConfig(),
         pricing=PricingConfig(),
-        allocation=AllocationConfig(quarterly_months=[3, 6, 9, 12], allocation_window_days=7),
+        allocation=AllocationConfig(quarterly_months=[3, 6, 9, 12], allocation_window_days=7, bootstrap_on_first_run=False),
         safety=SafetyConfig(no_trade_minutes_after_open=60),
     )
     client = MagicMock()
