@@ -56,32 +56,15 @@ class ContractFinder:
 
     def _determine_underlying(self) -> str | None:
         pref = self._config.strategy.underlying_preference
-        if pref.upper() in ("SPY", "SPYM"):
+        if pref.upper() in ("SPY",):
             return pref.upper()
 
-        # Auto: try SPY first, fall back to SPYM if can't afford
-        spy_price = self._client.get_underlying_price("SPY")
-        target_strike = spy_price * (1 - self._config.strategy.itm_depth_pct)
-        estimated_cost = (spy_price - target_strike) * 100  # rough intrinsic per contract
-        options_bp = self._client.get_options_buying_power()
-
-        if options_bp >= estimated_cost * 1.2:
-            logger.info(
-                "Auto-selected SPY (options BP $%.0f, est contract cost $%.0f)",
-                options_bp, estimated_cost,
-            )
-            return "SPY"
-
-        logger.info(
-            "SPY too expensive (need ~$%.0f, options BP $%.0f), trying SPYM",
-            estimated_cost, options_bp,
-        )
-        try:
-            self._client.get_underlying_price("SPYM")
-            return "SPYM"
-        except Exception:
-            logger.error("SPYM price not available; cannot afford SPY either")
-            return None
+        # Auto: always use SPY. The actual affordability check happens downstream
+        # in the allocator when it computes cost_per_contract from the real ask
+        # price. We don't gate on a rough estimate here because intrinsic-based
+        # guesses can be 20-30% off from the actual ask (time value on LEAPs is
+        # substantial), which would block accounts that CAN afford the real price.
+        return "SPY"
 
     def _expiry_window(self) -> tuple[date, date]:
         today = date.today()

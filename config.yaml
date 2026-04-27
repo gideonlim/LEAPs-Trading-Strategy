@@ -3,7 +3,7 @@ dry_run: false
 log_level: INFO
 
 strategy:
-  underlying_preference: auto    # SPY, SPYM, or auto (picks by buying power)
+  underlying_preference: SPY     # SPY or auto (checks affordability)
   itm_depth_pct: 0.20            # strike = underlying × (1 - this)
   min_expiry_months: 12
   max_expiry_months: 18
@@ -19,8 +19,8 @@ pricing:
 
 allocation:
   quarterly_months: [3, 6, 9, 12]
-  max_cash_deploy_pct: 0.90
-  min_cash_reserve: 500.0
+  max_cash_deploy_pct: 1.0
+  min_cash_reserve: 0.0
   allocation_window_days: 7     # only allocate within first N calendar days of quarter month
   bootstrap_on_first_run: true  # deploy capital immediately on first run (don't wait for quarterly window)
 

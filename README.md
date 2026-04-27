@@ -39,6 +39,7 @@ Example: Buy a 12-month deep ITM call, sell when ~4 months remain, immediately r
 - Python 3.10+
 - An [Alpaca](https://alpaca.markets) account (paper trading is fine)
 - Options trading enabled (Level 2 minimum for buying calls)
+- **Minimum account balance: ~$17,000–$18,000** for 1 contract at 20% ITM on SPY. The exact minimum depends on SPY's current price — a 20% ITM LEAPs call costs roughly `SPY price × 0.20 × 100 × 1.15` (intrinsic + ~15% time value). At SPY $714 that's ~$16,400 per contract. The bot needs enough buying power to cover this plus a small reserve ($200).
 
 ### Install
 
