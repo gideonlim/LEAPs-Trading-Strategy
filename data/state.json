@@ -1,0 +1,37 @@
+{
+  "positions": [],
+  "allocations": [],
+  "pending_orders": [],
+  "last_run": "2026-04-27T14:37:12.895025+00:00",
+  "last_trade_date": null,
+  "trades": [],
+  "snapshots": [
+    {
+      "date": "2026-04-27",
+      "timestamp": "2026-04-27T14:37:12.895025+00:00",
+      "cash": 10000.0,
+      "options_buying_power": 10000.0,
+      "portfolio_value": 10000.0,
+      "positions_market_value": 0.0,
+      "num_positions": 0,
+      "underlying_prices": {
+        "SPY": 713.85
+      },
+      "positions": []
+    }
+  ],
+  "runs": [
+    {
+      "timestamp": "2026-04-27T14:37:12.895025+00:00",
+      "duration_seconds": 20.888661,
+      "skipped": false,
+      "skip_reason": null,
+      "actions": [],
+      "errors": [],
+      "real_trades_today": false,
+      "portfolio_value": 10000.0,
+      "run_type": "trade"
+    }
+  ],
+  "pending_followups": []
+}
