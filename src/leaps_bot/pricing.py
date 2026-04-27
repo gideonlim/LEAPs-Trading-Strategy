@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from scipy.stats import norm
 
@@ -59,27 +59,32 @@ class RateFetcher:
 
     def _try_fetch_treasury_rate(self) -> None:
         try:
-            from datetime import date as _date
-            from urllib.parse import quote
+            from datetime import date as _date, timedelta
 
-            today = _date.today()
-            url = (
-                "https://data.treasury.gov/feed.svc/DailyTreasuryYieldCurveRateData"
-                f"?$filter=month(NEW_DATE)%20eq%20{today.month}%20and%20year(NEW_DATE)%20eq%20{today.year}"
-                "&$orderby=NEW_DATE%20desc&$top=1"
-            )
-            response = urlopen(url, timeout=10)  # noqa: S310
+            # FRED (Federal Reserve Economic Data) CSV endpoint — free, no API
+            # key, returns the 1-year constant maturity treasury rate (DGS1).
+            start = (_date.today() - timedelta(days=10)).isoformat()
+            url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS1&cosd={start}"
+            req = Request(url, headers={"User-Agent": "leaps-bot/1.0"})
+            response = urlopen(req, timeout=10)  # noqa: S310
             body = response.read().decode("utf-8")
-            tag = "d:BC_1YEAR"
-            start = body.find(f"<{tag}>")
-            end = body.find(f"</{tag}>")
-            if start != -1 and end != -1:
-                rate_str = body[start + len(tag) + 2 : end]
-                rate = float(rate_str) / 100.0
+
+            # Parse last non-header line with a valid rate
+            rate = None
+            for line in reversed(body.strip().split("\n")):
+                parts = line.split(",")
+                if len(parts) == 2:
+                    try:
+                        rate = float(parts[1]) / 100.0
+                        break
+                    except ValueError:
+                        continue
+
+            if rate is not None and 0 < rate < 0.20:
                 self._risk_free_rate = rate
-                logger.info("Fetched 1Y treasury rate: %.4f", rate)
-                return
-            logger.warning("Could not parse treasury rate from response")
+                logger.info("Fetched 1Y treasury rate from FRED: %.4f", rate)
+            else:
+                logger.warning("FRED returned unexpected rate value: %s", rate)
         except Exception as e:
             logger.warning("Failed to fetch treasury rate, using config default: %s", e)
 

@@ -91,9 +91,10 @@ def test_calculate_limit_price_buy():
         delta=0.88, iv=0.20, open_interest=500,
         theoretical_price=118.0,
     )
-    # Buy: min(theo=118, mid=120) * 1.02 = 118 * 1.02 = 120.36
+    # Buy: mid + (ask - mid) * 0.02 = 120 + 1 * 0.02 = 120.02
+    # (test config uses default limit_offset_pct=0.02)
     price = finder.calculate_limit_price(candidate, "buy")
-    assert price == 120.36
+    assert price == 120.02
 
 
 def test_calculate_limit_price_sell():
@@ -107,6 +108,6 @@ def test_calculate_limit_price_sell():
         delta=0.88, iv=0.20, open_interest=500,
         theoretical_price=118.0,
     )
-    # Sell: max(theo=118, mid=120) * 0.98 = 120 * 0.98 = 117.60
+    # Sell: mid - (mid - bid) * 0.02 = 120 - 1 * 0.02 = 119.98
     price = finder.calculate_limit_price(candidate, "sell")
-    assert price == 117.60
+    assert price == 119.98

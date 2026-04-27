@@ -9,10 +9,10 @@ strategy:
   max_expiry_months: 18
   sell_threshold_fraction: 0.333  # sell when 1/3 of original DTE remains
   order_type: limit               # market or limit
-  limit_offset_pct: 0.02          # limit price offset from theoretical (positive = more aggressive)
+  limit_offset_pct: 0.0           # fill aggression: 0.0 = at mid, 1.0 = at ask/bid. 0.0 places limit at mid-price
 
 pricing:
-  risk_free_rate: 0.045           # fallback 1Y treasury rate
+  risk_free_rate: 0.037           # fallback 1Y treasury rate (update if FRED fetch fails)
   dividend_yield: 0.013           # fallback SPY dividend yield
   max_extrinsic_pct: 0.25         # reject if extrinsic > 25% of theoretical price
   price_divergence_warn_pct: 0.10 # warn if theoretical vs market diverge > 10%
@@ -26,9 +26,9 @@ allocation:
 
 safety:
   no_trade_minutes_after_open: 60
-  max_bid_ask_spread_pct: 0.10
-  min_open_interest: 100
-  min_delta: 0.80
+  max_bid_ask_spread_pct: 0.15    # 15% — relaxed for indicative (delayed) feed; limit orders protect against bad fills
+  min_open_interest: 10           # deep ITM LEAPs have thin OI; 10 is enough to confirm the contract is alive
+  min_delta: 0.70                 # relaxed from 0.80 — indicative deltas can be stale by 0.05-0.10; real delta at 20% ITM is ~0.85+
   emergency_sell_days: 30
   stale_quote_warn_minutes: 15
 

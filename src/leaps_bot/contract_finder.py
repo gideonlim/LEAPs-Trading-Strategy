@@ -80,10 +80,13 @@ class ContractFinder:
         expiry_gte: date,
         expiry_lte: date,
     ) -> list[ContractCandidate]:
-        # Strike range: target ± 5% of spot to capture nearby listed strikes
-        strike_margin = spot * 0.05
-        strike_gte = target_strike - strike_margin
-        strike_lte = target_strike + strike_margin
+        # Strike range: asymmetric around target.
+        # Lower bound: target - 2% of spot (deeper ITM, higher cost)
+        # Upper bound: target + 1% of spot (slightly shallower, cheaper)
+        # This allows buying at the target or slightly less deep, but not
+        # significantly shallower than the configured ITM depth.
+        strike_gte = target_strike - spot * 0.02
+        strike_lte = target_strike + spot * 0.01
 
         contracts = self._client.find_option_contracts(
             underlying=underlying,
@@ -235,13 +238,30 @@ class ContractFinder:
         )
 
     def calculate_limit_price(self, candidate: ContractCandidate, side: str) -> float:
-        theo = candidate.theoretical_price
+        """Compute a fill-oriented limit price.
+
+        For buys: place between mid and ask — close enough to the ask to
+        actually fill, but not paying the full ask. Deep ITM LEAPs have wide
+        spreads; placing at or below mid (the old logic) lands near the bid
+        where no seller will hit it.
+
+        For sells: place between bid and mid — close enough to the bid to
+        fill, but better than just dumping at the bid.
+
+        `limit_offset_pct` controls aggression: 0.0 = at mid, 1.0 = at
+        the ask/bid edge. Default 0.60 = 60% of the way from mid toward
+        the ask (buys) or bid (sells).
+        """
         mid = candidate.mid
-        offset_pct = self._config.strategy.limit_offset_pct
+        bid = candidate.bid
+        ask = candidate.ask
+        aggression = self._config.strategy.limit_offset_pct
 
         if side == "buy":
-            base = min(theo, mid) if mid > 0 else theo
-            return round(base * (1 + offset_pct), 2)
-        else:  # sell
-            base = max(theo, mid) if mid > 0 else theo
-            return round(base * (1 - offset_pct), 2)
+            if ask > 0 and mid > 0:
+                return round(mid + (ask - mid) * aggression, 2)
+            return round(mid * 1.01, 2) if mid > 0 else round(candidate.theoretical_price, 2)
+        else:
+            if bid > 0 and mid > 0:
+                return round(mid - (mid - bid) * aggression, 2)
+            return round(mid * 0.99, 2) if mid > 0 else round(candidate.theoretical_price, 2)
