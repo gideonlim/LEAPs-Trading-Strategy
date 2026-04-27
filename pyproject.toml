@@ -1,0 +1,33 @@
+[project]
+name = "leaps-bot"
+version = "0.1.0"
+description = "LEAPs deep ITM call options strategy bot for S&P 500 via Alpaca"
+requires-python = ">=3.10"
+dependencies = [
+    "alpaca-py>=0.40.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "scipy>=1.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+]
+
+[project.scripts]
+leaps-bot = "leaps_bot.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
