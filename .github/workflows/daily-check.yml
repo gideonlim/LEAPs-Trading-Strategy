@@ -3,7 +3,7 @@ name: LEAPs Bot Daily Check
 on:
   schedule:
     - cron: '33 10 * * 1-5'
-      timezone: America/New_York    # 10:33 AM ET — after 9:30 open + 60-min no-trade window
+      timezone: America/New_York
   workflow_dispatch:
 
 concurrency:
@@ -19,8 +19,6 @@ jobs:
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -31,17 +29,6 @@ jobs:
       - name: Install dependencies
         run: pip install -e .
 
-      - name: Fetch bot state
-        run: |
-          mkdir -p data
-          if git fetch origin bot-state:bot-state 2>/dev/null && git rev-parse --verify bot-state >/dev/null 2>&1; then
-            git show bot-state:data/state.json > data/state.json 2>/dev/null || echo '{}' > data/state.json
-          else
-            echo '{}' > data/state.json
-          fi
-          echo "Initial state:"
-          cat data/state.json
-
       - name: Run daily check
         id: bot_run
         env:
@@ -50,40 +37,25 @@ jobs:
         run: leaps-bot run --config config.yaml --state data/state.json
         continue-on-error: true
 
-      - name: Push updated state
+      - name: Commit updated state
         if: always()
         run: |
           git config user.name "leaps-bot"
           git config user.email "leaps-bot@github-actions"
-
-          STATE_TMP=$(mktemp)
-          cp data/state.json "$STATE_TMP"
-
-          if git fetch origin bot-state:bot-state 2>/dev/null && git rev-parse --verify bot-state >/dev/null 2>&1; then
-            git checkout -f bot-state
-            git pull --rebase origin bot-state || true
-          else
-            git checkout --orphan bot-state
-            git rm -rf . 2>/dev/null || true
-          fi
-
-          mkdir -p data
-          cp "$STATE_TMP" data/state.json
-
           git add data/state.json
           if ! git diff --cached --quiet; then
             git commit -m "Update bot state $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git pull --rebase origin main || true
             PUSH_OK=0
             for i in 1 2 3; do
-              if git push origin bot-state; then
+              if git push origin main; then
                 PUSH_OK=1
                 break
               fi
-              echo "Push attempt $i failed, refetching and retrying..."
-              git pull --rebase origin bot-state || true
+              git pull --rebase origin main || true
             done
             if [ "$PUSH_OK" -ne 1 ]; then
-              echo "::error::Failed to push bot state after 3 attempts. State may be lost."
+              echo "::error::Failed to push state after 3 attempts."
               exit 1
             fi
           else
@@ -93,5 +65,5 @@ jobs:
       - name: Fail if bot run failed
         if: steps.bot_run.outcome == 'failure'
         run: |
-          echo "Bot run failed; state was still pushed if any updates occurred"
+          echo "Bot run failed — check logs above. State was committed if changed."
           exit 1
