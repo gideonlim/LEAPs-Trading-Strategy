@@ -8,6 +8,7 @@ build/
 
 .env
 data/state.json
+data/fx_cache.json
 logs/
 reports/
 

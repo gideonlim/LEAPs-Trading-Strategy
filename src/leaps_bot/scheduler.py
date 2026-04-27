@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from leaps_bot.allocator import QuarterlyAllocator
 from leaps_bot.alpaca_client import AlpacaClient, _safe_float
@@ -12,6 +12,7 @@ from leaps_bot.models import (
     AllocationRecord,
     ContractCandidate,
     DailySnapshot,
+    FollowupAction,
     OptionDetails,
     OrderResult,
     PendingOrderRecord,
@@ -19,6 +20,7 @@ from leaps_bot.models import (
     PositionSnapshot,
     RunRecord,
     TradeRecord,
+    now_utc_iso,
 )
 from leaps_bot.order_executor import OrderExecutor
 from leaps_bot.position_manager import PositionManager
@@ -49,7 +51,10 @@ class DailyScheduler:
     def run(self) -> dict:
         summary: dict = {"actions": [], "errors": [], "skipped": False, "real_trades_today": False}
         today_iso = date.today().isoformat()
-        run_start = datetime.now()
+        # Use UTC-aware timestamps consistently. Naive datetime.now() would
+        # interpret as local time on the host, which would skew ordering
+        # against tz-aware broker timestamps when running off a non-UTC box.
+        run_start = datetime.now(timezone.utc)
         now_str = run_start.isoformat()
 
         # last_run is a monitoring timestamp — always update, even on dry-run
@@ -67,6 +72,9 @@ class DailyScheduler:
             self._reconcile_pending_orders(summary)
 
             if not already_traded:
+                # Drain any followup actions queued by prior monitor passes
+                # (e.g., roll buys for sells that filled mid-day yesterday)
+                self._process_pending_followups(summary)
                 self._handle_positions(summary)
                 if self._allocator.should_allocate_today():
                     self._handle_allocation(summary)
@@ -87,7 +95,64 @@ class DailyScheduler:
         finally:
             # Always record the run, even on early exit / skip / exception
             if not self._config.dry_run:
-                duration = (datetime.now() - run_start).total_seconds()
+                duration = (datetime.now(timezone.utc) - run_start).total_seconds()
+                self._record_run(summary, now_str, duration)
+
+    def monitor(self, capture_snapshot: bool = True) -> dict:
+        """Read-only reconciliation pass. NEVER originates orders.
+
+        Used by the mid-day and EOD monitor workflows to:
+        1. Reconcile pending orders (record fills, partial fills, expirations)
+        2. Optionally capture a portfolio snapshot
+
+        This method is SAFE to invoke at any time — including outside market
+        hours and outside the no-trade window. The hard invariant is that
+        it never calls `_handle_positions`, `_handle_allocation`, or any
+        order-submission path. It only observes broker state and updates
+        local bookkeeping.
+        """
+        summary: dict = {
+            "actions": [], "errors": [], "skipped": False,
+            "real_trades_today": False, "monitor_only": True,
+        }
+        today_iso = date.today().isoformat()
+        run_start = datetime.now(timezone.utc)
+        now_str = run_start.isoformat()
+
+        self._state.last_run = now_str
+
+        try:
+            # Account preflight — but skip the market-hours / no-trade-window
+            # checks that gate _trading_. Monitor is allowed when market is
+            # closed (that's when EOD reconciliation typically happens).
+            try:
+                acct = self._client.get_account()
+                if getattr(acct, "trading_blocked", False):
+                    logger.error("Trading is blocked on this account")
+                    summary["errors"].append("Account trading blocked")
+                    return summary
+            except Exception as e:
+                logger.error("Account check failed: %s", e)
+                summary["errors"].append(f"Account check failed: {e}")
+                return summary
+
+            # Reconcile any pending orders. This is the work the morning
+            # workflow couldn't do (orders submitted at 10:33 AM may have
+            # filled at 10:35 AM, but we wouldn't know until tomorrow without
+            # a mid-day or EOD pass).
+            self._reconcile_pending_orders(summary)
+
+            if capture_snapshot and not self._config.dry_run:
+                snapshot = self._capture_daily_snapshot(today_iso, now_str)
+                if snapshot is not None:
+                    self._state.add_snapshot(snapshot)
+                    summary["portfolio_value"] = snapshot.portfolio_value
+
+            self._log_summary(summary)
+            return summary
+        finally:
+            if not self._config.dry_run:
+                duration = (datetime.now(timezone.utc) - run_start).total_seconds()
                 self._record_run(summary, now_str, duration)
 
     def _capture_daily_snapshot(self, today_iso: str, timestamp: str) -> DailySnapshot | None:
@@ -189,6 +254,7 @@ class DailyScheduler:
             errors=list(summary.get("errors", [])),
             real_trades_today=summary.get("real_trades_today", False),
             portfolio_value=summary.get("portfolio_value"),
+            run_type="monitor" if summary.get("monitor_only") else "trade",
         ))
 
     # -- Preflight --
@@ -294,14 +360,28 @@ class DailyScheduler:
                 })
 
                 # Roll forward only after sell is confirmed terminal AND had at
-                # least some fill (we're not rolling on zero-fill cancellations)
+                # least some fill (we're not rolling on zero-fill cancellations).
+                # CRITICAL: this only QUEUES the followup. The actual buy is
+                # submitted by `_process_pending_followups`, which is called
+                # ONLY from `run()`, never from `monitor()`. This keeps the
+                # safety invariant that monitor never originates orders.
                 if (
                     pending.action == "sell"
                     and pending.intent == "roll"
                     and pending.underlying
                     and filled_qty > 0
                 ):
-                    self._submit_roll_buy(pending.underlying, filled_qty, summary)
+                    self._state.pending_followups.append(FollowupAction(
+                        action_type="roll",
+                        underlying=pending.underlying,
+                        qty=filled_qty,
+                        sourced_from_order_id=pending.order_id,
+                        queued_at=now_utc_iso(),
+                    ))
+                    logger.info(
+                        "Queued roll followup: buy %d %s LEAPs (sourced from sell %s)",
+                        filled_qty, pending.underlying, pending.order_id,
+                    )
 
                 self._state.remove_pending_order(pending.order_id)
             elif status == "partially_filled":
@@ -489,12 +569,12 @@ class DailyScheduler:
 
         Prefers `filled_at` (set when the order is fully filled), falls back to
         `updated_at` (last change — typically the most recent partial fill),
-        then `submitted_at`, then now() as last resort. This is what should be
-        recorded on TradeRecord and used for holding-period math, NOT the
-        reconciliation time, since reconciliation can lag the actual fill.
+        then `submitted_at`, then now() (UTC-aware) as last resort. This is what
+        should be recorded on TradeRecord and used for holding-period math, NOT
+        the reconciliation time, since reconciliation can lag the actual fill.
         """
         if order is None:
-            return datetime.now().isoformat()
+            return now_utc_iso()
         for attr in ("filled_at", "updated_at", "submitted_at"):
             ts = getattr(order, attr, None)
             if ts is None:
@@ -502,7 +582,7 @@ class DailyScheduler:
             if isinstance(ts, datetime):
                 return ts.isoformat()
             return str(ts)
-        return datetime.now().isoformat()
+        return now_utc_iso()
 
     @staticmethod
     def _parse_iso_date(iso_timestamp: str) -> date:
@@ -557,17 +637,59 @@ class DailyScheduler:
                 intent=intent,
                 option_symbol=action.option_symbol,
                 qty=action.qty,
-                submitted_at=datetime.now().isoformat(),
+                submitted_at=now_utc_iso(),
                 underlying=details.underlying,
             ))
             summary["real_trades_today"] = True
 
-    def _submit_roll_buy(self, underlying: str, qty: int, summary: dict) -> None:
+    def _process_pending_followups(self, summary: dict) -> None:
+        """Drain the queue of followup actions left by prior monitor passes.
+
+        Each FollowupAction was queued when reconciliation observed a relevant
+        fill but couldn't act (because monitor mustn't originate orders). The
+        morning trading run is the only place these are processed.
+
+        Successfully executed followups are removed. Failed ones STAY QUEUED
+        so the next morning's run retries them — a transient failure (no
+        contract found, API blip) shouldn't permanently drop a roll that the
+        strategy needs for position continuity.
+        """
+        if not self._state.pending_followups:
+            return
+
+        remaining: list[FollowupAction] = []
+        for followup in self._state.pending_followups:
+            if followup.action_type == "roll":
+                logger.info(
+                    "Processing queued roll: buy %d %s LEAPs (queued at %s, sourced from %s)",
+                    followup.qty, followup.underlying, followup.queued_at,
+                    followup.sourced_from_order_id,
+                )
+                success = self._submit_roll_buy(followup.underlying, followup.qty, summary)
+                if not success:
+                    logger.warning(
+                        "Roll followup failed — keeping queued for retry on next run "
+                        "(underlying=%s, qty=%d, sourced_from=%s)",
+                        followup.underlying, followup.qty, followup.sourced_from_order_id,
+                    )
+                    remaining.append(followup)
+            else:
+                logger.warning(
+                    "Unknown followup action_type %r — leaving in queue for manual review",
+                    followup.action_type,
+                )
+                remaining.append(followup)
+
+        self._state.pending_followups = remaining
+
+    def _submit_roll_buy(self, underlying: str, qty: int, summary: dict) -> bool:
+        """Attempt to find and buy replacement LEAPs. Returns True if an order
+        was successfully accepted by the broker (or simulated in dry-run)."""
         candidate = self._finder.find_best_leaps_call(underlying)
         if candidate is None:
             logger.error("Roll forward failed: no LEAPs contract found for %s", underlying)
             summary["errors"].append(f"Roll forward: no contract for {underlying}")
-            return
+            return False
 
         limit_price = self._finder.calculate_limit_price(candidate, "buy")
         result = self._executor.execute_buy(candidate.symbol, qty, limit_price)
@@ -584,13 +706,15 @@ class DailyScheduler:
             self._state.add_pending_order(PendingOrderRecord(
                 order_id=result.order_id,
                 action="buy",
-                intent="open",  # already part of a roll, but the buy itself just opens
+                intent="open",
                 option_symbol=candidate.symbol,
                 qty=qty,
-                submitted_at=datetime.now().isoformat(),
+                submitted_at=now_utc_iso(),
                 underlying=underlying,
             ))
             summary["real_trades_today"] = True
+
+        return result.success
 
     # -- Allocation handling: submit buy, record allocation only on fill --
 
@@ -613,7 +737,7 @@ class DailyScheduler:
                     intent="allocate",
                     option_symbol=r.symbol,
                     qty=r.qty,
-                    submitted_at=datetime.now().isoformat(),
+                    submitted_at=now_utc_iso(),
                     quarter=self._state.current_quarter_key(today_iso),
                 ))
                 summary["real_trades_today"] = True

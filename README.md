@@ -61,10 +61,15 @@ ALPACA_SECRET_KEY=your-secret
 ```bash
 leaps-bot status                            # show current positions and account state
 leaps-bot dry-run                           # simulate today's actions without placing orders
-leaps-bot run                               # execute the daily check
+leaps-bot run                               # execute the daily trade check (places orders)
+leaps-bot monitor                           # reconcile pending orders + capture snapshot (never trades)
+leaps-bot monitor --no-snapshot             # reconcile only, used by mid-day workflow
 leaps-bot report                            # generate PDF performance report
 leaps-bot export-trades                     # export full trade log as CSV
-leaps-bot export-tax --year 2026            # export 1099-B-style tax CSV for a year
+leaps-bot export-tax --year 2026                   # US calendar year tax CSV
+leaps-bot export-tax --fy 2026                     # Australian FY (Jul 2025 – Jun 2026), USD only
+leaps-bot export-tax --fy 2026 --fx-auto           # AU FY with per-trade AUD/USD conversion (ATO-recommended)
+leaps-bot export-tax --fy 2026 --aud-rate 1.52     # AU FY with flat-rate conversion (offline fallback)
 ```
 
 The first run will create `data/state.json` to track positions, allocations, trades, and daily snapshots. Generated reports go to `reports/` (gitignored).
@@ -73,7 +78,13 @@ The first run will create `data/state.json` to track positions, allocations, tra
 
 - **PDF report** — summary stats, portfolio value chart with SPY benchmark, cumulative realized P&L chart, open positions table, allocation history, recent trade history
 - **Trade CSV** — every fill (buy + sell) with timestamps, prices, underlying price at trade, realized P&L for closes
-- **Tax CSV** — closed positions in 1099-B format: description, dates, proceeds, cost basis, gain/loss, holding period, short-term/long-term classification
+- **Tax CSV** — closed positions for tax filing. Two filter modes (mutually exclusive):
+  - `--year YYYY`: US calendar year. Column `term` = `short` / `long` (>365 days)
+  - `--fy YYYY`: Australian financial year (Jul 1 of YYYY-1 to Jun 30 of YYYY). Column `cgt_discount_eligible` = `yes` / `no` (held >12 months → eligible for 50% CGT discount)
+
+  Two optional FX modes (mutually exclusive) add `fx_rate`, `proceeds_aud`, `cost_basis_aud`, `gain_loss_aud` columns:
+  - `--fx-auto`: fetches the AUD/USD rate **on each trade's actual fill date** from [Frankfurter](https://www.frankfurter.app) (free, ECB-sourced). This is the ATO-recommended approach for foreign currency transactions. Rates are cached to `data/fx_cache.json`. Note: ECB rates differ from RBA's official 4 PM rate by ~0.1%; for material amounts verify against RBA's [F11 historical exchange rates](https://www.rba.gov.au/statistics/historical-data.html).
+  - `--aud-rate RATE`: flat-rate conversion (e.g., `--aud-rate 1.52`). Quick offline approximation; not ATO-accurate for material amounts.
 
 ## Configuration
 
@@ -101,18 +112,27 @@ All strategy parameters live in [config.yaml](config.yaml). Key settings:
 
 ## GitHub Actions Setup
 
-The bot is designed to run on GitHub Actions weekdays at 10:33 AM ET.
+The bot runs on GitHub Actions via **three weekday workflows**, all in Eastern Time (DST handled automatically via the `timezone` field):
+
+| Workflow | Cron (ET) | What it does |
+|---|---|---|
+| [daily-check.yml](.github/workflows/daily-check.yml) | 10:33 AM | Trading run — sells, rolls, quarterly allocations |
+| [midday-monitor.yml](.github/workflows/midday-monitor.yml) | 2:30 PM | Reconciles fills from morning orders (no snapshot, no trades) |
+| [eod-monitor.yml](.github/workflows/eod-monitor.yml) | 4:30 PM | Reconciles + captures canonical EOD snapshot (no trades) |
+
+All three share a single concurrency group (`leaps-bot-run`) so they can never overlap. Only the morning workflow originates orders; the mid-day and EOD runs only observe and reconcile broker state.
+
+### Setup steps
 
 1. Push the repo to GitHub
 2. Go to **Settings → Secrets and variables → Actions**
 3. Add two repository secrets:
    - `ALPACA_API_KEY`
    - `ALPACA_SECRET_KEY`
-4. Verify the workflow file at [.github/workflows/daily-check.yml](.github/workflows/daily-check.yml)
-5. Go to **Actions** and enable workflows
-6. State persists across runs on a dedicated `bot-state` branch (created automatically on first run)
+4. Go to **Actions** and enable workflows
+5. State persists across runs on a dedicated `bot-state` branch (created automatically on first run)
 
-You can also trigger runs manually via the **Run workflow** button in the Actions tab.
+You can also trigger any workflow manually via the **Run workflow** button in the Actions tab.
 
 ## Going Live
 

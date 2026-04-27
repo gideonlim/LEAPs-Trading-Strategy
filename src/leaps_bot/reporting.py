@@ -13,6 +13,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from leaps_bot.fx import FlatFXProvider, FXProvider
 from leaps_bot.models import (
     AllocationRecord,
     DailySnapshot,
@@ -642,20 +643,61 @@ class ReportGenerator:
         logger.info("Trade log CSV written to %s (%d trades)", output_path, len(self._state.trades))
         return output_path
 
-    def export_tax_csv(self, output_path: Path, year: int | None = None) -> Path:
-        """1099-B-style closed-position report.
+    def export_tax_csv(
+        self,
+        output_path: Path,
+        year: int | None = None,
+        fy: int | None = None,
+        aud_rate: float | None = None,
+        fx_provider: FXProvider | None = None,
+    ) -> Path:
+        """Closed-position tax report.
 
-        Each row is a closing transaction (a sell trade) with cost basis,
-        proceeds, gain/loss, and short-term/long-term classification.
-        Set `year` to filter to a specific tax year (default: all years).
+        Two filter modes (mutually exclusive):
+        - `year=YYYY`: US-style calendar year filter (Jan 1 – Dec 31). Column
+          `term` is `short` / `long` against the 365-day threshold.
+        - `fy=YYYY`: Australian financial year filter (Jul 1 of YYYY-1 to
+          Jun 30 of YYYY). E.g., `fy=2026` → Jul 1, 2025 to Jun 30, 2026.
+          Column `cgt_discount_eligible` is `yes` / `no` based on whether
+          the position was held for more than 12 months (the AU 50% CGT
+          discount threshold).
+
+        FX conversion (mutually exclusive options):
+        - `aud_rate`: flat AUD/USD rate applied to all rows. Quick
+          approximation; not ATO-accurate for material amounts.
+        - `fx_provider`: source of per-trade FX rates (e.g.,
+          `FrankfurterFXProvider`). The rate on each trade's actual fill date
+          is used. ATO-recommended for accurate filing.
+
+        Either approach adds `proceeds_aud`, `cost_basis_aud`, `gain_loss_aud`
+        columns and a `fx_rate` column showing the rate used per row.
         """
+        if year is not None and fy is not None:
+            raise ValueError("Pass either `year` (US calendar) or `fy` (AU financial), not both")
+        if aud_rate is not None and fx_provider is not None:
+            raise ValueError("Pass either `aud_rate` (flat) or `fx_provider` (per-trade), not both")
+
+        # Normalize: a flat rate becomes a FlatFXProvider so the row loop has
+        # one code path.
+        if aud_rate is not None:
+            fx_provider = FlatFXProvider(aud_rate)
+
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        sells = [t for t in self._state.trades if t.action == "sell"]
-        if year is not None:
-            sells = [t for t in sells if t.timestamp.startswith(str(year))]
+        is_au_mode = fy is not None
 
+        sells = [t for t in self._state.trades if t.action == "sell"]
+        sells = self._filter_sells_for_period(sells, year=year, fy=fy)
+        sells = sorted(sells, key=lambda t: parse_timestamp(t.timestamp))
+
+        # If we're using a real per-trade provider, prefetch the date range
+        # in one shot so we don't fire one HTTP request per sell.
+        if fx_provider is not None and sells:
+            self._maybe_prefetch_fx(fx_provider, sells)
+
+        # Column layout depends on jurisdiction and FX mode
+        period_term_field = "cgt_discount_eligible" if is_au_mode else "term"
         fields = [
             "description",
             "date_acquired",
@@ -665,14 +707,21 @@ class ReportGenerator:
             "cost_basis",
             "gain_loss",
             "holding_period_days",
-            "term",          # "short" or "long" (long = held > 365 days)
+            period_term_field,
             "underlying",
             "strike",
             "expiry",
             "symbol",
             "order_id",
         ]
+        if fx_provider is not None:
+            insert_at = fields.index("gain_loss") + 1
+            fields[insert_at:insert_at] = [
+                "fx_rate", "proceeds_aud", "cost_basis_aud", "gain_loss_aud",
+            ]
+
         missing_basis_count = 0
+        missing_fx_count = 0
         with open(output_path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(fields)
@@ -689,19 +738,18 @@ class ReportGenerator:
                     except ValueError:
                         pass
 
-                # Term classification only meaningful when we know holding period
                 if t.holding_days is None:
-                    term = ""
+                    period_term = ""
+                elif is_au_mode:
+                    period_term = "yes" if t.holding_days > 365 else "no"
                 else:
-                    term = "long" if t.holding_days > 365 else "short"
+                    period_term = "long" if t.holding_days > 365 else "short"
 
                 proceeds = t.fill_price * t.qty * 100
 
-                # Cost basis must NOT be fabricated to 0 when entry price is missing.
-                # That would produce wildly inflated gains and a misleading tax row.
-                # Leave fields empty so the user is forced to fill them in manually
-                # (and we log a clear warning naming the affected order).
                 if t.avg_entry_price is None:
+                    cost_basis = None
+                    gain_loss = None
                     cost_basis_str = ""
                     gain_loss_str = ""
                     missing_basis_count += 1
@@ -721,7 +769,7 @@ class ReportGenerator:
 
                 description = self._option_description(t)
 
-                w.writerow([
+                row = [
                     description,
                     date_acquired,
                     date_sold,
@@ -729,14 +777,40 @@ class ReportGenerator:
                     f"{proceeds:.2f}",
                     cost_basis_str,
                     gain_loss_str,
+                ]
+
+                if fx_provider is not None:
+                    # Use the FX rate on the trade's fill date (ATO-recommended:
+                    # the rate at the time of the transaction, not a flat rate)
+                    try:
+                        sold_dt = date.fromisoformat(date_sold)
+                        rate = fx_provider.get_rate(sold_dt)
+                    except ValueError:
+                        rate = None
+
+                    if rate is None:
+                        missing_fx_count += 1
+                        logger.warning(
+                            "Tax export: no FX rate for %s on %s — leaving AUD columns blank",
+                            t.symbol, date_sold,
+                        )
+                        row.extend(["", "", "", ""])
+                    else:
+                        row.append(f"{rate:.6f}")
+                        row.append(f"{proceeds * rate:.2f}")
+                        row.append(f"{cost_basis * rate:.2f}" if cost_basis is not None else "")
+                        row.append(f"{gain_loss * rate:.2f}" if gain_loss is not None else "")
+
+                row.extend([
                     t.holding_days if t.holding_days is not None else "",
-                    term,
+                    period_term,
                     t.underlying,
                     f"{t.strike:.2f}",
                     t.expiry,
                     t.symbol,
                     t.order_id,
                 ])
+                w.writerow(row)
 
         if missing_basis_count:
             logger.warning(
@@ -744,9 +818,92 @@ class ReportGenerator:
                 "before filing — they appear in %s with empty cost_basis/gain_loss fields.",
                 missing_basis_count, output_path,
             )
-        logger.info("Tax CSV written to %s (%d closed trades%s)",
-                    output_path, len(sells), f", year={year}" if year else "")
+        if missing_fx_count:
+            logger.warning(
+                "Tax export: %d row(s) had no FX rate available — AUD columns are blank "
+                "for those rows. Possible causes: offline, API down, or trade date "
+                "outside the available rate range. Re-run with network access or use "
+                "--aud-rate as a flat-rate fallback.",
+                missing_fx_count,
+            )
+
+        if fx_provider is not None:
+            if isinstance(fx_provider, FlatFXProvider):
+                logger.warning(
+                    "Tax export: AUD figures use a FLAT rate. The ATO generally expects "
+                    "per-transaction conversion using the RBA daily AUD/USD rate "
+                    "(or its annual average). Verify whether the flat rate is "
+                    "acceptable for your filing.",
+                )
+            else:
+                logger.info(
+                    "Tax export: AUD figures use per-trade rates from %s. Note that "
+                    "ECB-source rates differ from RBA's official 4 PM rate by ~0.1%%; "
+                    "for material amounts, verify against RBA F11 data.",
+                    fx_provider.describe(),
+                )
+
+        period_label = (
+            f"FY{fy}" if fy is not None
+            else (f"year={year}" if year is not None else "all years")
+        )
+        logger.info(
+            "Tax CSV written to %s (%d closed trades, %s%s)",
+            output_path, len(sells), period_label,
+            f", FX={fx_provider.describe()}" if fx_provider is not None else "",
+        )
         return output_path
+
+    @staticmethod
+    def _maybe_prefetch_fx(fx_provider: FXProvider, sells: list[TradeRecord]) -> None:
+        """If the provider supports range prefetching (e.g., Frankfurter),
+        fetch all needed dates in one HTTP request."""
+        if not hasattr(fx_provider, "prefetch_range"):
+            return
+        try:
+            trade_dates = []
+            for t in sells:
+                try:
+                    trade_dates.append(date.fromisoformat(t.timestamp.split("T")[0]))
+                except ValueError:
+                    continue
+            if not trade_dates:
+                return
+            fx_provider.prefetch_range(min(trade_dates), max(trade_dates))
+        except Exception as e:
+            logger.warning("FX prefetch failed: %s — falling back to per-row lookup", e)
+
+    @staticmethod
+    def _filter_sells_for_period(
+        sells: list[TradeRecord],
+        year: int | None = None,
+        fy: int | None = None,
+    ) -> list[TradeRecord]:
+        """Filter sell trades to a tax-year period.
+
+        - `year`: calendar year (Jan 1 – Dec 31)
+        - `fy`: Australian FY (Jul 1 of fy-1 → Jun 30 of fy). E.g., fy=2026
+          spans 2025-07-01 to 2026-06-30.
+        """
+        if year is None and fy is None:
+            return sells
+
+        if fy is not None:
+            start = date(fy - 1, 7, 1)
+            end = date(fy, 6, 30)
+        else:
+            start = date(year, 1, 1)
+            end = date(year, 12, 31)
+
+        result = []
+        for t in sells:
+            try:
+                trade_date = parse_timestamp(t.timestamp).date()
+            except (ValueError, AttributeError):
+                continue
+            if start <= trade_date <= end:
+                result.append(t)
+        return result
 
     @staticmethod
     def _option_description(t: TradeRecord) -> str:

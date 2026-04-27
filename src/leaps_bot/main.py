@@ -27,9 +27,19 @@ def main() -> None:
     common.add_argument("--state", default="data/state.json", help="Path to state file")
     common.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
-    sub.add_parser("run", parents=[common], help="Execute the daily check")
+    sub.add_parser("run", parents=[common], help="Execute the daily check (places orders)")
     sub.add_parser("dry-run", parents=[common], help="Simulate without placing orders")
     sub.add_parser("status", parents=[common], help="Show current positions and account state")
+
+    p_monitor = sub.add_parser(
+        "monitor", parents=[common],
+        help="Read-only reconciliation pass — reconciles pending orders + captures snapshot. "
+             "Never places orders. Safe to run any time, including outside market hours.",
+    )
+    p_monitor.add_argument(
+        "--no-snapshot", action="store_true",
+        help="Skip the daily snapshot (use for mid-day reconciliation where EOD will snapshot anyway).",
+    )
 
     p_report = sub.add_parser("report", parents=[common], help="Generate a PDF performance report")
     p_report.add_argument("--output", default=None, help="Output PDF path (default: reports/leaps-report-<date>.pdf)")
@@ -37,9 +47,33 @@ def main() -> None:
     p_trades = sub.add_parser("export-trades", parents=[common], help="Export full trade log to CSV")
     p_trades.add_argument("--output", default=None, help="Output CSV path (default: reports/trades.csv)")
 
-    p_tax = sub.add_parser("export-tax", parents=[common], help="Export tax-year closed positions (1099-B style) to CSV")
-    p_tax.add_argument("--year", type=int, default=None, help="Tax year (default: all years)")
-    p_tax.add_argument("--output", default=None, help="Output CSV path (default: reports/tax-<year>.csv)")
+    p_tax = sub.add_parser(
+        "export-tax", parents=[common],
+        help="Export closed positions to CSV for tax filing (US calendar year or AU financial year)",
+    )
+    period_group = p_tax.add_mutually_exclusive_group()
+    period_group.add_argument(
+        "--year", type=int, default=None,
+        help="US calendar year (Jan 1 – Dec 31). E.g., --year 2026",
+    )
+    period_group.add_argument(
+        "--fy", type=int, default=None,
+        help="Australian financial year (Jul 1 to Jun 30). E.g., --fy 2026 = Jul 2025 to Jun 2026. "
+             "Output uses 'cgt_discount_eligible' column (yes/no) for the 50%% CGT discount.",
+    )
+    fx_group = p_tax.add_mutually_exclusive_group()
+    fx_group.add_argument(
+        "--aud-rate", type=float, default=None,
+        help="Flat AUD/USD rate for AUD columns (e.g., --aud-rate 1.52). "
+             "Quick approximation; not ATO-accurate for material amounts.",
+    )
+    fx_group.add_argument(
+        "--fx-auto", action="store_true",
+        help="Fetch the AUD/USD rate on each trade's fill date from Frankfurter "
+             "(free, ECB-sourced). ATO-recommended approach for foreign currency "
+             "tax events. Cached to data/fx_cache.json between runs.",
+    )
+    p_tax.add_argument("--output", default=None, help="Output CSV path (default: reports/tax-<period>.csv)")
 
     args = parser.parse_args()
 
@@ -75,7 +109,10 @@ def main() -> None:
     summary = {}
     exit_code = 0
     try:
-        summary = scheduler.run()
+        if args.command == "monitor":
+            summary = scheduler.monitor(capture_snapshot=not args.no_snapshot)
+        else:
+            summary = scheduler.run()
         if summary.get("errors"):
             exit_code = 1
     except Exception as e:
@@ -111,9 +148,23 @@ def _run_reporting(args, state: BotState) -> None:
         if args.output:
             out = Path(args.output)
         else:
-            year_part = f"-{args.year}" if args.year else ""
-            out = Path(f"reports/tax{year_part}.csv")
-        path = generator.export_tax_csv(out, year=args.year)
+            if args.fy is not None:
+                period_part = f"-fy{args.fy}"
+            elif args.year is not None:
+                period_part = f"-{args.year}"
+            else:
+                period_part = ""
+            out = Path(f"reports/tax{period_part}.csv")
+
+        fx_provider = None
+        if args.fx_auto:
+            from leaps_bot.fx import FrankfurterFXProvider
+            fx_provider = FrankfurterFXProvider()
+
+        path = generator.export_tax_csv(
+            out, year=args.year, fy=args.fy,
+            aud_rate=args.aud_rate, fx_provider=fx_provider,
+        )
         print(f"Tax CSV: {path}")
 
 

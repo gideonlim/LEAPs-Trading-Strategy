@@ -1,20 +1,22 @@
-name: LEAPs Bot Daily Check
+name: LEAPs Bot Mid-Day Monitor
 
+# Runs mid-session to confirm that morning orders have been executed.
+# MONITOR-ONLY: reconciles pending orders but never submits new ones.
 on:
   schedule:
-    - cron: '33 10 * * 1-5'
-      timezone: America/New_York    # 10:33 AM ET — after 9:30 open + 60-min no-trade window
+    - cron: '30 14 * * 1-5'
+      timezone: America/New_York    # 2:30 PM ET — several hours after morning fills
   workflow_dispatch:
 
 concurrency:
-  group: leaps-bot-run
+  group: leaps-bot-run    # Shared with daily-check + eod-monitor — no overlap
   cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  daily-check:
+  midday-monitor:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
@@ -39,15 +41,14 @@ jobs:
           else
             echo '{}' > data/state.json
           fi
-          echo "Initial state:"
-          cat data/state.json
 
-      - name: Run daily check
-        id: bot_run
+      - name: Reconcile pending orders (no snapshot)
+        id: bot_monitor
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-        run: leaps-bot run --config config.yaml --state data/state.json
+        # --no-snapshot: EOD workflow captures the canonical daily snapshot.
+        run: leaps-bot monitor --no-snapshot --config config.yaml --state data/state.json
         continue-on-error: true
 
       - name: Push updated state
@@ -72,7 +73,7 @@ jobs:
 
           git add data/state.json
           if ! git diff --cached --quiet; then
-            git commit -m "Update bot state $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git commit -m "Mid-day monitor $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             PUSH_OK=0
             for i in 1 2 3; do
               if git push origin bot-state; then
@@ -83,15 +84,13 @@ jobs:
               git pull --rebase origin bot-state || true
             done
             if [ "$PUSH_OK" -ne 1 ]; then
-              echo "::error::Failed to push bot state after 3 attempts. State may be lost."
+              echo "::error::Failed to push bot state after 3 attempts."
               exit 1
             fi
           else
             echo "No state changes to commit"
           fi
 
-      - name: Fail if bot run failed
-        if: steps.bot_run.outcome == 'failure'
-        run: |
-          echo "Bot run failed; state was still pushed if any updates occurred"
-          exit 1
+      - name: Fail if monitor failed
+        if: steps.bot_monitor.outcome == 'failure'
+        run: exit 1

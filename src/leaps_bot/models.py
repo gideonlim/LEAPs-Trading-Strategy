@@ -5,19 +5,37 @@ from datetime import date, datetime, timezone
 from enum import Enum
 
 
+def now_utc_iso() -> str:
+    """Return the current time as a UTC-aware ISO string.
+
+    All bot-internal timestamps go through this helper instead of
+    `datetime.now().isoformat()` (which is naive — no tzinfo). Tz-aware
+    output means timestamps are correct regardless of the host machine's
+    local time, including weird cases like running locally from a non-UTC
+    laptop or a runner with TZ misconfigured. `parse_timestamp` then
+    decodes them deterministically.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
 def parse_timestamp(ts: str | None) -> datetime:
     """Parse an ISO timestamp string to a timezone-aware UTC datetime.
 
-    Necessary because timestamps in this system come from two sources:
-    - Internal: `datetime.now().isoformat()` → naive (no tzinfo)
+    Necessary because timestamps in this system come from multiple sources:
+    - Modern internal writes: `now_utc_iso()` → tz-aware UTC
+    - Legacy internal writes: `datetime.now().isoformat()` → naive (no tzinfo)
     - Broker: Alpaca `filled_at` → tz-aware (often `+00:00` suffix)
 
     Lexical string comparison across naive and aware ISO strings can misorder
-    events that happened at the same instant. This helper normalizes both to
-    UTC datetime so comparisons and sorting are correct.
+    events that happened at the same instant. This helper normalizes them all
+    to UTC datetime so comparisons and sorting are correct.
 
-    Naive strings are assumed to be UTC (the bot is run from GitHub Actions
-    runners which default to UTC, and `datetime.now()` on those returns UTC).
+    Naive strings are interpreted as UTC. This is correct for new writes
+    (which use `now_utc_iso`) and approximately correct for legacy writes
+    from GitHub Actions runners (which default to UTC). Legacy writes from
+    non-UTC local machines would have a small offset, but that's an
+    unavoidable cost of pre-fix data — fixed going forward.
+
     Returns `datetime.min` (UTC) for None or unparseable input — keeps unknown
     timestamps at the very beginning of any sort, which is safe.
     """
@@ -154,6 +172,25 @@ class PendingOrderRecord:
 
 
 @dataclass
+class FollowupAction:
+    """An action queued by reconciliation that the next trading run will execute.
+
+    Used so monitor passes can reconcile fills (record trades, remove positions,
+    keep state accurate) without violating the safety invariant that monitor
+    never originates orders. The morning workflow drains this queue before
+    running its normal trade evaluation.
+
+    Currently the only kind is "roll" — a replacement-LEAPs buy queued after
+    a sell-with-roll-intent fills.
+    """
+    action_type: str  # "roll" for now; future kinds would extend this
+    underlying: str
+    qty: int
+    sourced_from_order_id: str   # the sell order whose fill triggered this
+    queued_at: str               # ISO timestamp when queued
+
+
+@dataclass
 class TradeRecord:
     """A single fill (or fill increment) — the canonical record of a transaction.
 
@@ -219,3 +256,4 @@ class RunRecord:
     errors: list[str] = field(default_factory=list)
     real_trades_today: bool = False
     portfolio_value: float | None = None
+    run_type: str = "trade"    # "trade" (morning run) or "monitor" (mid-day/EOD)

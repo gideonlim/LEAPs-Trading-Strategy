@@ -9,6 +9,7 @@ from typing import Any, Type, TypeVar
 from leaps_bot.models import (
     AllocationRecord,
     DailySnapshot,
+    FollowupAction,
     PendingOrderRecord,
     PositionRecord,
     PositionSnapshot,
@@ -73,6 +74,9 @@ class BotState:
     trades: list[TradeRecord] = field(default_factory=list)
     snapshots: list[DailySnapshot] = field(default_factory=list)
     runs: list[RunRecord] = field(default_factory=list)
+    # Actions queued by monitor reconciliation, drained by next trading run.
+    # Keeps the monitor invariant clean: monitor reconciles, run() acts.
+    pending_followups: list[FollowupAction] = field(default_factory=list)
 
     def save(self, path: Path = DEFAULT_STATE_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +99,7 @@ class BotState:
         pending_orders = [_build_record(PendingOrderRecord, o) for o in data.get("pending_orders", [])]
         trades = [_build_record(TradeRecord, t) for t in data.get("trades", [])]
         runs = [_build_record(RunRecord, r) for r in data.get("runs", [])]
+        pending_followups = [_build_record(FollowupAction, f) for f in data.get("pending_followups", [])]
 
         # DailySnapshot has nested PositionSnapshot list — rebuild explicitly
         snapshots = []
@@ -114,6 +119,7 @@ class BotState:
             trades=trades,
             snapshots=snapshots,
             runs=runs,
+            pending_followups=pending_followups,
         )
 
     # -- Reporting log accessors --
