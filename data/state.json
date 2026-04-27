@@ -1,22 +1,49 @@
 {
-  "positions": [],
-  "allocations": [],
-  "pending_orders": [
+  "positions": [
     {
+      "option_symbol": "SPY270617C00570000",
+      "underlying": "SPY",
+      "strike": 570.0,
+      "expiry_date": "2027-06-17",
+      "purchase_date": "2026-04-27",
+      "original_dte": 416,
+      "qty": 1,
+      "avg_entry_price": 180.35,
+      "order_id": "864506eb-0740-461b-be2d-6e9be9cba01f"
+    }
+  ],
+  "allocations": [
+    {
+      "quarter": "2026-Q2",
+      "allocated_date": "2026-04-27",
+      "amount": 18035.0,
+      "contracts_bought": [
+        "SPY270617C00570000"
+      ]
+    }
+  ],
+  "pending_orders": [],
+  "last_run": "2026-04-27T15:18:20.118438+00:00",
+  "last_trade_date": "2026-04-28",
+  "trades": [
+    {
+      "timestamp": "2026-04-27T15:06:21.529150+00:00",
       "order_id": "864506eb-0740-461b-be2d-6e9be9cba01f",
       "action": "buy",
       "intent": "allocate",
-      "option_symbol": "SPY270617C00570000",
+      "symbol": "SPY270617C00570000",
+      "underlying": "SPY",
+      "strike": 570.0,
+      "expiry": "2027-06-17",
       "qty": 1,
-      "submitted_at": "2026-04-27T15:06:20.737395+00:00",
-      "underlying": "",
-      "quarter": "2026-Q2",
-      "recorded_qty": 0
+      "fill_price": 180.35,
+      "total_value": 18035.0,
+      "underlying_price": 712.93,
+      "avg_entry_price": null,
+      "realized_pnl": null,
+      "holding_days": null
     }
   ],
-  "last_run": "2026-04-27T15:06:15.545627+00:00",
-  "last_trade_date": "2026-04-28",
-  "trades": [],
   "snapshots": [
     {
       "date": "2026-04-28",
@@ -45,6 +72,34 @@
           "days_remaining": 415
         }
       ]
+    },
+    {
+      "date": "2026-04-27",
+      "timestamp": "2026-04-27T15:18:20.118438+00:00",
+      "cash": 1964.98,
+      "options_buying_power": 1964.98,
+      "portfolio_value": 19621.98,
+      "positions_market_value": 17657.0,
+      "num_positions": 1,
+      "underlying_prices": {
+        "SPY": 712.93
+      },
+      "positions": [
+        {
+          "symbol": "SPY270617C00570000",
+          "underlying": "SPY",
+          "strike": 570.0,
+          "expiry": "2027-06-17",
+          "qty": 1,
+          "avg_entry_price": 180.35,
+          "current_price": 176.57,
+          "market_value": 17657.0,
+          "cost_basis": 18035.0,
+          "unrealized_pl": -378.0,
+          "unrealized_plpc": -0.02096,
+          "days_remaining": 416
+        }
+      ]
     }
   ],
   "runs": [
@@ -59,6 +114,20 @@
       "errors": [],
       "real_trades_today": true,
       "portfolio_value": 19610.98,
+      "run_type": "trade"
+    },
+    {
+      "timestamp": "2026-04-27T15:18:20.118438+00:00",
+      "duration_seconds": 3.327714,
+      "skipped": false,
+      "skip_reason": null,
+      "actions": [
+        "fill_buy:SPY270617C00570000",
+        "filled:SPY270617C00570000"
+      ],
+      "errors": [],
+      "real_trades_today": false,
+      "portfolio_value": 19621.98,
       "run_type": "trade"
     }
   ],
