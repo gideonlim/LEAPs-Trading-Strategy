@@ -96,7 +96,7 @@ class DailyScheduler:
             # Capture daily portfolio snapshot — only on full runs (preflight passed)
             # and not in dry-run mode (snapshots are persistent state).
             if not self._config.dry_run:
-                snapshot = self._capture_daily_snapshot(today_iso, now_str)
+                snapshot = self._capture_daily_snapshot(today_iso)
                 if snapshot is not None:
                     self._state.add_snapshot(snapshot)
                     summary["portfolio_value"] = snapshot.portfolio_value
@@ -154,7 +154,7 @@ class DailyScheduler:
             self._reconcile_pending_orders(summary)
 
             if capture_snapshot and not self._config.dry_run:
-                snapshot = self._capture_daily_snapshot(today_iso, now_str)
+                snapshot = self._capture_daily_snapshot(today_iso)
                 if snapshot is not None:
                     self._state.add_snapshot(snapshot)
                     summary["portfolio_value"] = snapshot.portfolio_value
@@ -166,7 +166,14 @@ class DailyScheduler:
                 duration = (datetime.now(timezone.utc) - run_start).total_seconds()
                 self._record_run(summary, now_str, duration)
 
-    def _capture_daily_snapshot(self, today_iso: str, timestamp: str) -> DailySnapshot | None:
+    def _capture_daily_snapshot(self, today_iso: str) -> DailySnapshot | None:
+        # Timestamp must reflect when the data is actually fetched, NOT the
+        # run-start time. During bootstrap, an order can fill mid-run; if
+        # the snapshot claims to be from before the fill but its data is
+        # post-fill, the flow detector sees a phantom deposit equal to the
+        # trade size. This caused a -91% TWR on a -1% actual loss.
+        timestamp = now_utc_iso()
+
         try:
             acct = self._client.get_account()
         except Exception as e:

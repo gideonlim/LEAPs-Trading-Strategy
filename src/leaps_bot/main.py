@@ -44,6 +44,13 @@ def main() -> None:
     p_report = sub.add_parser("report", parents=[common], help="Generate a PDF performance report")
     p_report.add_argument("--output", default=None, help="Output PDF path (default: reports/leaps-report-<date>.pdf)")
 
+    p_send = sub.add_parser(
+        "send-report", parents=[common],
+        help="Generate PDF + trades CSV and email them via Gmail SMTP",
+    )
+    p_send.add_argument("--to", required=True, help="Recipient email address")
+    p_send.add_argument("--subject", default=None, help="Email subject (default: auto-generated with date)")
+
     p_trades = sub.add_parser("export-trades", parents=[common], help="Export full trade log to CSV")
     p_trades.add_argument("--output", default=None, help="Output CSV path (default: reports/trades.csv)")
 
@@ -89,7 +96,7 @@ def main() -> None:
     state = BotState.load(state_path)
 
     # Reporting commands don't need API keys
-    if args.command in ("report", "export-trades", "export-tax"):
+    if args.command in ("report", "export-trades", "export-tax", "send-report"):
         _run_reporting(args, state)
         return
 
@@ -166,6 +173,46 @@ def _run_reporting(args, state: BotState) -> None:
             aud_rate=args.aud_rate, fx_provider=fx_provider,
         )
         print(f"Tax CSV: {path}")
+
+    elif args.command == "send-report":
+        import os
+
+        gmail_user = os.environ.get("GMAIL_USER", "")
+        gmail_app_password = os.environ.get("GMAIL_APP_PASSWORD", "")
+        if not gmail_user or not gmail_app_password:
+            print("ERROR: GMAIL_USER and GMAIL_APP_PASSWORD must be set in environment", file=sys.stderr)
+            sys.exit(1)
+
+        today_str = date.today().isoformat()
+        pdf_path = Path(f"reports/leaps-report-{today_str}.pdf")
+        csv_path = Path("reports/trades.csv")
+
+        generator.generate_pdf(pdf_path)
+        generator.export_trades_csv(csv_path)
+
+        subject = args.subject or f"LEAPs Bot Weekly Report — {today_str}"
+        summary = generator.compute_summary()
+        body = (
+            f"LEAPs Bot Weekly Report — {today_str}\n\n"
+            f"Portfolio value: ${summary.portfolio_value:,.2f}\n"
+            f"Cash: ${summary.cash:,.2f}\n"
+            f"Open positions: {summary.num_open_positions}\n"
+            f"Total return: {summary.total_return_pct:+.2f}% (TWR)\n"
+            f"Realized P&L: ${summary.total_realized_pnl:,.2f}\n"
+            f"Unrealized P&L: ${summary.total_unrealized_pnl:,.2f}\n\n"
+            f"See attached PDF for full report and trades CSV for transaction log."
+        )
+
+        from leaps_bot.emailer import send_report_email
+        send_report_email(
+            gmail_user=gmail_user,
+            gmail_app_password=gmail_app_password,
+            to_email=args.to,
+            subject=subject,
+            body=body,
+            attachments=[pdf_path, csv_path],
+        )
+        print(f"Report emailed to {args.to}")
 
 
 if __name__ == "__main__":

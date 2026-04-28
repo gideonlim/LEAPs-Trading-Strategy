@@ -1,0 +1,40 @@
+name: LEAPs Bot Weekly Report
+
+# Runs Saturday morning after the full trading week is done.
+# Generates PDF performance report + trades CSV and emails them.
+on:
+  schedule:
+    - cron: '0 9 * * 6'
+      timezone: America/New_York    # 9:00 AM ET Saturday
+  workflow_dispatch:                 # manual trigger for testing
+
+concurrency:
+  group: leaps-bot-run
+  cancel-in-progress: false
+
+jobs:
+  weekly-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Generate and email report
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          REPORT_EMAIL: ${{ secrets.REPORT_EMAIL }}
+        run: |
+          leaps-bot send-report \
+            --to "$REPORT_EMAIL" \
+            --config config.yaml \
+            --state data/state.json
