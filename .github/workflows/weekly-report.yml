@@ -28,6 +28,24 @@ jobs:
       - name: Install dependencies
         run: pip install -e .
 
+      - name: Capture fresh snapshot
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: leaps-bot monitor --config config.yaml --state data/state.json
+        continue-on-error: true
+
+      - name: Commit updated state
+        run: |
+          git config user.name "leaps-bot"
+          git config user.email "leaps-bot@github-actions"
+          git add data/state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Weekly report snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git pull --rebase origin main || true
+            git push origin main || true
+          fi
+
       - name: Generate and email report
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
