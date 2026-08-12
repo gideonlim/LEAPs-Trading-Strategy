@@ -23,7 +23,7 @@
     }
   ],
   "pending_orders": [],
-  "last_run": "2026-08-12T15:28:36.881266+00:00",
+  "last_run": "2026-08-12T19:35:53.195642+00:00",
   "last_trade_date": "2026-04-28",
   "trades": [
     {
@@ -6732,6 +6732,17 @@
       "real_trades_today": false,
       "portfolio_value": 24279.95,
       "run_type": "trade"
+    },
+    {
+      "timestamp": "2026-08-12T19:35:53.195642+00:00",
+      "duration_seconds": 0.146324,
+      "skipped": false,
+      "skip_reason": null,
+      "actions": [],
+      "errors": [],
+      "real_trades_today": false,
+      "portfolio_value": null,
+      "run_type": "monitor"
     }
   ],
   "pending_followups": []
