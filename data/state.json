@@ -23,7 +23,7 @@
     }
   ],
   "pending_orders": [],
-  "last_run": "2026-10-22T23:30:08.139608+00:00",
+  "last_run": "2026-10-23T18:34:43.550146+00:00",
   "last_trade_date": "2026-04-28",
   "trades": [
     {
@@ -6792,6 +6792,34 @@
           "days_remaining": 238
         }
       ]
+    },
+    {
+      "date": "2026-10-23",
+      "timestamp": "2026-10-23T18:34:44.539515+00:00",
+      "cash": 1964.95,
+      "options_buying_power": 1964.95,
+      "portfolio_value": 22867.95,
+      "positions_market_value": 20903.0,
+      "num_positions": 1,
+      "underlying_prices": {
+        "SPY": 760.95
+      },
+      "positions": [
+        {
+          "symbol": "SPY270617C00570000",
+          "underlying": "SPY",
+          "strike": 570.0,
+          "expiry": "2027-06-17",
+          "qty": 1,
+          "avg_entry_price": 180.35,
+          "current_price": 209.03,
+          "market_value": 20903.0,
+          "cost_basis": 18035.0,
+          "unrealized_pl": 2868.0,
+          "unrealized_plpc": 0.15902,
+          "days_remaining": 237
+        }
+      ]
     }
   ],
   "runs": [
@@ -11035,6 +11063,17 @@
       "real_trades_today": false,
       "portfolio_value": 23160.95,
       "run_type": "monitor"
+    },
+    {
+      "timestamp": "2026-10-23T18:34:43.550146+00:00",
+      "duration_seconds": 1.727502,
+      "skipped": false,
+      "skip_reason": null,
+      "actions": [],
+      "errors": [],
+      "real_trades_today": false,
+      "portfolio_value": 22867.95,
+      "run_type": "trade"
     }
   ],
   "pending_followups": []
